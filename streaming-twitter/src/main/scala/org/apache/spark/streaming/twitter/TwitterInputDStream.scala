@@ -113,3 +113,79 @@ class TwitterReceiver(
     twitterStream = newTwitterStream
   }
 }
+
+private[streaming]
+class TwitterFilterInputDStream(
+                           _ssc: StreamingContext,
+                           twitterAuth: Option[Authorization],
+                           filters: Option[FilterQuery],
+                           storageLevel: StorageLevel
+                         ) extends ReceiverInputDStream[Status](_ssc)  {
+
+  private def createOAuthAuthorization(): Authorization = {
+    new OAuthAuthorization(new ConfigurationBuilder().build())
+  }
+
+  private val authorization = twitterAuth.getOrElse(createOAuthAuthorization())
+
+  override def getReceiver(): Receiver[Status] = {
+    new TwitterFilterReceiver(authorization, filters, storageLevel)
+  }
+}
+
+private[streaming]
+class TwitterFilterReceiver(
+     twitterAuth: Authorization,
+     filter: Option[FilterQuery],
+     storageLevel: StorageLevel
+   ) extends Receiver[Status](storageLevel) with Logging {
+
+  @volatile private var twitterStream: TwitterStream = _
+  @volatile private var stopped = false
+
+  def onStart() {
+    try {
+      val newTwitterStream = new TwitterStreamFactory().getInstance(twitterAuth)
+      newTwitterStream.addListener(new StatusListener {
+        def onStatus(status: Status): Unit = {
+          store(status)
+        }
+        // Unimplemented
+        def onDeletionNotice(statusDeletionNotice: StatusDeletionNotice) {}
+        def onTrackLimitationNotice(i: Int) {}
+        def onScrubGeo(l: Long, l1: Long) {}
+        def onStallWarning(stallWarning: StallWarning): Unit = {
+          logInfo(s"Twitter receiver stallWarning: $stallWarning")
+        }
+        def onException(e: Exception) {
+          if (!stopped) {
+            restart("Error receiving tweets", e)
+          }
+        }
+      })
+
+      filter match {
+        case Some(filter) => newTwitterStream.filter(filter)
+        case _ => newTwitterStream.sample()
+      }
+      setTwitterStream(newTwitterStream)
+      logInfo("Twitter receiver started")
+      stopped = false
+    } catch {
+      case e: Exception => restart("Error starting Twitter stream", e)
+    }
+  }
+
+  def onStop() {
+    stopped = true
+    setTwitterStream(null)
+    logInfo("Twitter receiver stopped")
+  }
+
+  private def setTwitterStream(newTwitterStream: TwitterStream) = synchronized {
+    if (twitterStream != null) {
+      twitterStream.shutdown()
+    }
+    twitterStream = newTwitterStream
+  }
+}
